@@ -118,4 +118,101 @@ describe('calculateGoogleCost (Integration)', () => {
       currency: 'USD',
     });
   });
+
+  describe('regression tests for narevai/ai-billing#351', () => {
+    it('should fall back to completion rate when no reasoning rate is set', () => {
+      const pricingNoReasoningRate: ModelPricing = {
+        promptTokens: 2.0 / 1_000_000, // $2/M
+        completionTokens: 12.0 / 1_000_000, // $12/M
+        inputCacheReadTokens: 0.2 / 1_000_000, // $0.20/M
+      };
+
+      const usage = {
+        promptTokens: 1000,
+        completionTokens: 500, // includes reasoning tokens (Google convention)
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reasoningTokens: 300, // subtracted from completion for text billing
+      };
+
+      const result = calculateGoogleCost({
+        pricing: pricingNoReasoningRate,
+        usage,
+      });
+
+      // Correct: reasoning should use completionTokens rate ($12/M)
+      // Prompt: 1000 × $2/M = 2,000,000 nanos
+      // Text completion: (500 - 300) = 200 × $12/M = 2,400,000 nanos
+      // Reasoning at completion rate: 300 × $12/M = 3,600,000 nanos
+      // Total: 8,000,000 nanos
+      expect(result).toEqual({
+        amount: 8000000,
+        unit: 'nanos',
+        currency: 'USD',
+      });
+    });
+
+    it('should use explicit reasoning rate when set', () => {
+      const pricingWithReasoningRate: ModelPricing = {
+        promptTokens: 2.0 / 1_000_000,
+        completionTokens: 12.0 / 1_000_000,
+        internalReasoningTokens: 6.0 / 1_000_000, // half of completion
+      };
+
+      const usage = {
+        promptTokens: 1000,
+        completionTokens: 500,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reasoningTokens: 300,
+      };
+
+      const result = calculateGoogleCost({
+        pricing: pricingWithReasoningRate,
+        usage,
+      });
+
+      // Prompt: 1000 × $2/M = 2,000,000 nanos
+      // Text: 200 × $12/M = 2,400,000 nanos
+      // Reasoning: 300 × $6/M = 1,800,000 nanos
+      // Total: 6,200,000 nanos
+      expect(result).toEqual({
+        amount: 6200000,
+        unit: 'nanos',
+        currency: 'USD',
+      });
+    });
+
+    it('should preserve explicit zero reasoning rate', () => {
+      const pricingWithZeroReasoning: ModelPricing = {
+        promptTokens: 2.0 / 1_000_000,
+        completionTokens: 12.0 / 1_000_000,
+        internalReasoningTokens: 0, // explicitly free
+      };
+
+      const usage = {
+        promptTokens: 1000,
+        completionTokens: 500,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reasoningTokens: 300,
+      };
+
+      const result = calculateGoogleCost({
+        pricing: pricingWithZeroReasoning,
+        usage,
+      });
+
+      // With explicit 0, reasoning should be free
+      // Prompt: 2,000,000 nanos
+      // Text: 200 × $12/M = 2,400,000 nanos
+      // Reasoning: 0 nanos
+      // Total: 4,400,000 nanos
+      expect(result).toEqual({
+        amount: 4400000,
+        unit: 'nanos',
+        currency: 'USD',
+      });
+    });
+  });
 });

@@ -308,4 +308,133 @@ describe('OpenAIBillingMiddlewareV4 Integration', () => {
     expect(parsedEmittedEvent!).toMatchObject(expectedEvent);
     expect(parsedEmittedEvent!.generationId).toHaveLength(36);
   });
+
+  describe('regression tests for narevai/ai-billing#351', () => {
+    it('should not double-charge cached input tokens', async () => {
+      const destinationSpy = vi.fn();
+      const gpt5Pricing: ModelPricing = {
+        promptTokens: 1.25 / 1_000_000, // $1.25/M
+        completionTokens: 10.0 / 1_000_000, // $10/M
+        inputCacheReadTokens: 0.125 / 1_000_000, // $0.125/M
+      };
+
+      const middleware = createOpenAIV4Middleware({
+        destinations: [destinationSpy],
+        priceResolver: vi.fn().mockResolvedValue(gpt5Pricing),
+      });
+
+      const cachedResult = createResult({
+        usage: {
+          inputTokens: { total: 14438, noCache: 102, cacheRead: 14336, cacheWrite: 0 },
+          outputTokens: { total: 120, text: 56, reasoning: 64 },
+        },
+      });
+
+      const mockModel = new MockLanguageModelV4({
+        modelId: 'gpt-5',
+        provider: 'openai',
+        doGenerate: async () => cachedResult,
+      });
+
+      const wrappedModel = wrapLanguageModel({ model: mockModel, middleware });
+      await generateText({ model: wrappedModel, prompt: 'Test' });
+
+      await vi.waitFor(() => expect(destinationSpy).toHaveBeenCalledTimes(1));
+      const emittedEvent = destinationSpy.mock.calls[0]![0] as BillingEvent;
+
+      // Verify usage reports correct uncached tokens
+      expect(emittedEvent.usage.inputTokens).toBe(102); // uncached only
+      expect(emittedEvent.usage.cacheReadTokens).toBe(14336);
+
+      // Correct cost calculation (from narevai/ai-billing#351):
+      // Uncached input: 102 × $1.25/M = $0.0001275 = 127,500 nanos
+      // Cached input: 14336 × $0.125/M = $0.001792 = 1,792,000 nanos
+      // Text output: 56 × $10/M = $0.00056 = 560,000 nanos
+      // Reasoning at completion rate: 64 × $10/M = $0.00064 = 640,000 nanos
+      // Total: $0.0031195 = 3,119,500 nanos
+      expect(emittedEvent.cost?.amount).toBe(3119500);
+    });
+
+    it('should use noCache field when available', async () => {
+      const destinationSpy = vi.fn();
+      const simplePricing: ModelPricing = {
+        promptTokens: 1.0 / 1_000_000, // $1/M
+        completionTokens: 2.0 / 1_000_000, // $2/M
+        inputCacheReadTokens: 0.1 / 1_000_000, // $0.1/M
+      };
+
+      const middleware = createOpenAIV4Middleware({
+        destinations: [destinationSpy],
+        priceResolver: vi.fn().mockResolvedValue(simplePricing),
+      });
+
+      const result = createResult({
+        usage: {
+          inputTokens: { total: 1000, noCache: 200, cacheRead: 800, cacheWrite: 0 },
+          outputTokens: { total: 100, text: 100, reasoning: 0 },
+        },
+      });
+
+      const mockModel = new MockLanguageModelV4({
+        modelId: 'test-model',
+        provider: 'openai',
+        doGenerate: async () => result,
+      });
+
+      const wrappedModel = wrapLanguageModel({ model: mockModel, middleware });
+      await generateText({ model: wrappedModel, prompt: 'Test' });
+
+      await vi.waitFor(() => expect(destinationSpy).toHaveBeenCalledTimes(1));
+      const emittedEvent = destinationSpy.mock.calls[0]![0] as BillingEvent;
+
+      // Verify usage
+      expect(emittedEvent.usage.inputTokens).toBe(200); // should use noCache
+
+      // Correct cost:
+      // Uncached: 200 × $1/M = 200,000 nanos
+      // Cached: 800 × $0.1/M = 80,000 nanos
+      // Output: 100 × $2/M = 200,000 nanos
+      // Total: 480,000 nanos
+      expect(emittedEvent.cost?.amount).toBe(480000);
+    });
+
+    it('should fall back to total-cacheRead when noCache is undefined', async () => {
+      const destinationSpy = vi.fn();
+      const simplePricing: ModelPricing = {
+        promptTokens: 1.0 / 1_000_000,
+        completionTokens: 2.0 / 1_000_000,
+        inputCacheReadTokens: 0.1 / 1_000_000,
+      };
+
+      const middleware = createOpenAIV4Middleware({
+        destinations: [destinationSpy],
+        priceResolver: vi.fn().mockResolvedValue(simplePricing),
+      });
+
+      const result = createResult({
+        usage: {
+          inputTokens: { total: 1000, noCache: undefined, cacheRead: 800, cacheWrite: 0 },
+          outputTokens: { total: 100, text: 100, reasoning: 0 },
+        },
+      });
+
+      const mockModel = new MockLanguageModelV4({
+        modelId: 'test-model',
+        provider: 'openai',
+        doGenerate: async () => result,
+      });
+
+      const wrappedModel = wrapLanguageModel({ model: mockModel, middleware });
+      await generateText({ model: wrappedModel, prompt: 'Test' });
+
+      await vi.waitFor(() => expect(destinationSpy).toHaveBeenCalledTimes(1));
+      const emittedEvent = destinationSpy.mock.calls[0]![0] as BillingEvent;
+
+      // Should compute uncached as total - cacheRead = 1000 - 800 = 200
+      expect(emittedEvent.usage.inputTokens).toBe(200);
+
+      // Same cost as above
+      expect(emittedEvent.cost?.amount).toBe(480000);
+    });
+  });
 });

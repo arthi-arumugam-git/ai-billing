@@ -123,7 +123,7 @@ export function createGoogleV3Middleware<TTags extends DefaultTags>(
         googleMetadata?.google?.usageMetadata?.thoughtsTokenCount ?? 0;
 
       const googleAIUsage: CostInputs = {
-        promptTokens: inputTokensTotal,
+        promptTokens: inputTokensTotal - inputTokensCacheRead,
         completionTokens: outputTokensTotal ?? 0,
         cacheReadTokens: inputTokensCacheRead,
         cacheWriteTokens: 0,

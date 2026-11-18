@@ -151,4 +151,102 @@ describe('calculateOpenAICost (Integration)', () => {
       currency: 'USD',
     });
   });
+
+  describe('regression tests for narevai/ai-billing#351', () => {
+    it('should fall back to completion rate when no reasoning rate is set', () => {
+      const pricingNoReasoningRate: ModelPricing = {
+        promptTokens: 1.25 / 1_000_000, // $1.25/M
+        completionTokens: 10.0 / 1_000_000, // $10/M
+        inputCacheReadTokens: 0.125 / 1_000_000, // $0.125/M
+      };
+
+      const usage = {
+        promptTokens: 1000,
+        completionTokens: 500, // text-only portion
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reasoningTokens: 2500,
+      };
+
+      const result = calculateOpenAICost({
+        pricing: pricingNoReasoningRate,
+        usage,
+      });
+
+      // Correct: reasoning should use completionTokens rate ($10/M)
+      // Prompt: 1000 × $1.25/M = $0.00125 = 1,250,000 nanos
+      // Text completion: 500 × $10/M = $0.005 = 5,000,000 nanos
+      // Reasoning at completion rate: 2500 × $10/M = $0.025 = 25,000,000 nanos
+      // Total: $0.03125 = 31,250,000 nanos
+      expect(result).toEqual({
+        amount: 31250000,
+        unit: 'nanos',
+        currency: 'USD',
+      });
+    });
+
+    it('should use explicit reasoning rate when set', () => {
+      const pricingWithReasoningRate: ModelPricing = {
+        promptTokens: 1.25 / 1_000_000,
+        completionTokens: 10.0 / 1_000_000,
+        inputCacheReadTokens: 0.125 / 1_000_000,
+        internalReasoningTokens: 5.0 / 1_000_000, // half completion rate
+      };
+
+      const usage = {
+        promptTokens: 1000,
+        completionTokens: 500,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reasoningTokens: 2500,
+      };
+
+      const result = calculateOpenAICost({
+        pricing: pricingWithReasoningRate,
+        usage,
+      });
+
+      // Prompt: 1000 × $1.25/M = 1,250,000 nanos
+      // Text completion: 500 × $10/M = 5,000,000 nanos
+      // Reasoning at explicit rate: 2500 × $5/M = 12,500,000 nanos
+      // Total: 18,750,000 nanos
+      expect(result).toEqual({
+        amount: 18750000,
+        unit: 'nanos',
+        currency: 'USD',
+      });
+    });
+
+    it('should preserve explicit zero reasoning rate', () => {
+      const pricingWithZeroReasoning: ModelPricing = {
+        promptTokens: 1.25 / 1_000_000,
+        completionTokens: 10.0 / 1_000_000,
+        internalReasoningTokens: 0, // explicitly free
+      };
+
+      const usage = {
+        promptTokens: 1000,
+        completionTokens: 500,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reasoningTokens: 2500,
+      };
+
+      const result = calculateOpenAICost({
+        pricing: pricingWithZeroReasoning,
+        usage,
+      });
+
+      // With explicit 0, reasoning should be free
+      // Prompt: 1,250,000 nanos
+      // Completion: 5,000,000 nanos
+      // Reasoning: 0 nanos
+      // Total: 6,250,000 nanos
+      expect(result).toEqual({
+        amount: 6250000,
+        unit: 'nanos',
+        currency: 'USD',
+      });
+    });
+  });
 });
