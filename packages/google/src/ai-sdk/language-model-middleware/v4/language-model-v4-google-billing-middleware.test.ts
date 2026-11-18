@@ -267,4 +267,112 @@ describe('GoogleBillingMiddlewareV4 Integration', () => {
     expect(parsedEmittedEvent!).toMatchObject(expectedEvent);
     expect(parsedEmittedEvent!.generationId).toHaveLength(36);
   });
+
+  describe('regression tests for narevai/ai-billing#351', () => {
+    it('should not double-charge cached input tokens', async () => {
+      const destinationSpy = vi.fn();
+      const geminiPricing: ModelPricing = {
+        promptTokens: 2.0 / 1_000_000, // $2/M
+        completionTokens: 12.0 / 1_000_000, // $12/M
+        inputCacheReadTokens: 0.2 / 1_000_000, // $0.20/M
+        internalReasoningTokens: 12.0 / 1_000_000, // $12/M
+      };
+
+      const middleware = createGoogleV4Middleware({
+        destinations: [destinationSpy],
+        priceResolver: vi.fn().mockResolvedValue(geminiPricing),
+      });
+
+      const cachedResult = createResult({
+        providerMetadata: {
+          google: {
+            usageMetadata: {
+              promptTokenCount: 44621, // total including cached
+              candidatesTokenCount: 5, // text output
+              thoughtsTokenCount: 213, // reasoning
+              cachedContentTokenCount: 42567,
+            },
+          },
+        },
+      });
+
+      const mockModel = new MockLanguageModelV4({
+        modelId: 'gemini-3.1-pro-preview',
+        provider: 'google',
+        doGenerate: async () => cachedResult,
+      });
+
+      const wrappedModel = wrapLanguageModel({ model: mockModel, middleware });
+      await generateText({ model: wrappedModel, prompt: 'Test' });
+
+      await vi.waitFor(() => expect(destinationSpy).toHaveBeenCalledTimes(1));
+      const emittedEvent = destinationSpy.mock.calls[0]![0] as BillingEvent;
+
+      // Verify usage reports correct uncached tokens
+      // Uncached = 44621 - 42567 = 2054
+      expect(emittedEvent.usage.inputTokens).toBe(2054);
+      expect(emittedEvent.usage.cacheReadTokens).toBe(42567);
+      expect(emittedEvent.usage.outputTokens).toBe(218); // 5 + 213
+      expect(emittedEvent.usage.reasoningTokens).toBe(213);
+
+      // Correct cost calculation (from narevai/ai-billing#351):
+      // Uncached input: 2054 × $2/M = $0.004108 = 4,108,000 nanos
+      // Cached input: 42567 × $0.20/M = $0.0085134 = 8,513,400 nanos
+      // Text output: 5 × $12/M = $0.00006 = 60,000 nanos (completion count - reasoning)
+      // Reasoning: 213 × $12/M = $0.002556 = 2,556,000 nanos
+      // Total: $0.0152374 = 15,237,400 nanos
+      expect(emittedEvent.cost?.amount).toBe(15237400);
+    });
+
+    it('should handle calls with no cached tokens correctly', async () => {
+      const destinationSpy = vi.fn();
+      const geminiPricing: ModelPricing = {
+        promptTokens: 2.0 / 1_000_000,
+        completionTokens: 12.0 / 1_000_000,
+        inputCacheReadTokens: 0.2 / 1_000_000,
+        internalReasoningTokens: 12.0 / 1_000_000,
+      };
+
+      const middleware = createGoogleV4Middleware({
+        destinations: [destinationSpy],
+        priceResolver: vi.fn().mockResolvedValue(geminiPricing),
+      });
+
+      const noCacheResult = createResult({
+        providerMetadata: {
+          google: {
+            usageMetadata: {
+              promptTokenCount: 1000,
+              candidatesTokenCount: 50,
+              thoughtsTokenCount: 100,
+              cachedContentTokenCount: 0,
+            },
+          },
+        },
+      });
+
+      const mockModel = new MockLanguageModelV4({
+        modelId: 'gemini-3.1-pro-preview',
+        provider: 'google',
+        doGenerate: async () => noCacheResult,
+      });
+
+      const wrappedModel = wrapLanguageModel({ model: mockModel, middleware });
+      await generateText({ model: wrappedModel, prompt: 'Test' });
+
+      await vi.waitFor(() => expect(destinationSpy).toHaveBeenCalledTimes(1));
+      const emittedEvent = destinationSpy.mock.calls[0]![0] as BillingEvent;
+
+      // No cache means all 1000 input tokens are uncached
+      expect(emittedEvent.usage.inputTokens).toBe(1000);
+      expect(emittedEvent.usage.cacheReadTokens).toBe(0);
+
+      // Cost:
+      // Input: 1000 × $2/M = 2,000,000 nanos
+      // Text output: 50 × $12/M = 600,000 nanos
+      // Reasoning: 100 × $12/M = 1,200,000 nanos
+      // Total: 3,800,000 nanos
+      expect(emittedEvent.cost?.amount).toBe(3800000);
+    });
+  });
 });

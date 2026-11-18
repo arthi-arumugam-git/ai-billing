@@ -48,7 +48,7 @@ export const calculateGoogleCost = (params: {
   );
 
   const reasoningCost = multiplyCost(
-    rateToCost(pricing.internalReasoningTokens ?? 0),
+    rateToCost(pricing.internalReasoningTokens ?? pricing.completionTokens),
     usage.reasoningTokens,
   );
 

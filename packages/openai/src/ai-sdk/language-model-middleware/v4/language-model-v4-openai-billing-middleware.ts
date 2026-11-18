@@ -105,10 +105,12 @@ export function createOpenAIV4Middleware<TTags extends DefaultTags>(
         | OpenAIProviderMetadata
         | undefined;
 
+      const inputTotal = usage?.inputTokens?.total ?? 0;
+      const cacheRead = usage?.inputTokens?.cacheRead ?? 0;
       const openAIUsage: CostInputs = {
-        promptTokens: usage?.inputTokens?.total ?? 0,
+        promptTokens: usage?.inputTokens?.noCache ?? inputTotal - cacheRead,
         completionTokens: usage?.outputTokens?.text ?? 0,
-        cacheReadTokens: usage?.inputTokens?.cacheRead ?? 0,
+        cacheReadTokens: cacheRead,
         cacheWriteTokens: usage?.inputTokens?.cacheWrite ?? 0,
         reasoningTokens: usage?.outputTokens?.reasoning ?? 0,
         webSearchCount: webSearchCount,
